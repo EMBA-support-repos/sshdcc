@@ -18,7 +18,7 @@
 ## limitations under the License.
 ##
 
-if {[catch {package require Tcl 8.6} err]} { puts stderr "$err\nPlease install Tcl 8.6 or newer"; exit 1 }
+if {[catch {package require Tcl 8.6-} err]} { puts stderr "$err\nPlease install Tcl 8.6 or newer"; exit 1 }
 if {[catch {
 	package require cmdline
 	package require fileutil

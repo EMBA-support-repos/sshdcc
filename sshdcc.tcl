@@ -165,10 +165,10 @@ proc check_file {fn} {
 					} elseif {![file executable $value]} {
 						addresult notice "$key is not executable" {This will never work.}
 					} else {
-						if {[file_mode $value] & 0022} {
+						if {[file_mode $value] & 0o022} {
 							addresult warning "$key is writable by group or others" {Please change file permissions immediately.}
 						}
-						if {[check_parent_dir_mode $value 0022]} {
+						if {[check_parent_dir_mode $value 0o022]} {
 							addresult warning "parent directory is writable by group or others" {Please change file permissions if necessary.}
 						}
 					}
