@@ -24,12 +24,12 @@
 ##
 
 # the following lines are Tcl comments \
-for i in tclsh8.6 tclsh; do \
+for i in tclsh9.0 tclsh8.6 tclsh; do \
 	if type $i >/dev/null 2>&1; then exec $i "$0" "$@"; fi; \
 done; echo "Tcl not found. Please install Tcl 8.6 or newer"; exit 1
 
 set tool_name sshdcc
-set tool_version "0.2.2"
+set tool_version "0.3.0"
 set tool_url "https://github.com/sektioneins/$tool_name"
 set tool_copyright "(c) 2018-2025 SektionEins GmbH / Ben Fuhrmannek - https://sektioneins.de/"
 set tool_banner "OpenSSHd Security Config Checker v$tool_version"

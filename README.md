@@ -5,6 +5,11 @@ About
 -----
 SSHDCC can check your OpenSSH server configuration file for security improvements. This can be done either on a live system or remotely.
 
+OpenSSH Compatibility
+---------------------
+
+SSHDCC can check OpenSSH config files from version 7.6 (2018) (and probably earlier) up to version 10.0 (2025) (and likely later versions).
+
 Requirements
 ------------
 

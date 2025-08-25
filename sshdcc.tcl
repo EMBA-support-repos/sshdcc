@@ -2,11 +2,26 @@
 
 ## Only a subset of keywords may be used on the lines following a Match keyword. Available keywords are ...
 ## (... copied from sshd_config manpage)
-set match_keywords {AcceptEnv, AllowAgentForwarding, AllowGroups, AllowStreamLocalForwarding, AllowTcpForwarding, AllowUsers, AuthenticationMethods, AuthorizedKeysCommand, AuthorizedKeysCommandUser, AuthorizedKeysFile, AuthorizedPrincipalsCommand, AuthorizedPrincipalsCommandUser, AuthorizedPrincipalsFile, Banner, CASignatureAlgorithms, ChrootDirectory, ClientAliveCountMax, ClientAliveInterval, DenyGroups, DenyUsers, DisableForwarding, ExposeAuthInfo, ForceCommand, GatewayPorts, GSSAPIAuthentication, HostbasedAcceptedAlgorithms, HostbasedAuthentication, HostbasedUsesNameFromPacketOnly, IgnoreRhosts, Include, IPQoS, KbdInteractiveAuthentication, KerberosAuthentication, LogLevel, MaxAuthTries, MaxSessions, PasswordAuthentication, PermitEmptyPasswords, PermitListen, PermitOpen, PermitRootLogin, PermitTTY, PermitTunnel, PermitUserRC, PubkeyAcceptedAlgorithms, PubkeyAuthentication, PubkeyAuthOptions, RekeyLimit, RevokedKeys, RDomain, SetEnv, StreamLocalBindMask, StreamLocalBindUnlink, TrustedUserCAKeys, X11DisplayOffset, X11Forwarding, X11UseLocalhost}
+set match_keywords {AcceptEnv, AllowAgentForwarding, AllowGroups, AllowStreamLocalForwarding, AllowTcpForwarding, AllowUsers, AuthenticationMethods, AuthorizedKeysCommand, AuthorizedKeysCommandUser, AuthorizedKeysFile, AuthorizedPrincipalsCommand, AuthorizedPrincipalsCommandUser, AuthorizedPrincipalsFile, Banner, CASignatureAlgorithms, ChannelTimeout, ChrootDirectory, ClientAliveCountMax, ClientAliveInterval, DenyGroups, DenyUsers, DisableForwarding, ExposeAuthInfo, ForceCommand, GatewayPorts, GSSAPIAuthentication, HostbasedAcceptedAlgorithms, HostbasedAuthentication, HostbasedUsesNameFromPacketOnly, IgnoreRhosts, Include, IPQoS, KbdInteractiveAuthentication, KerberosAuthentication, LogLevel, MaxAuthTries, MaxSessions, PAMServiceName, PasswordAuthentication, PermitEmptyPasswords, PermitListen, PermitOpen, PermitRootLogin, PermitTTY, PermitTunnel, PermitUserRC, PubkeyAcceptedAlgorithms, PubkeyAuthentication, PubkeyAuthOptions, RefuseConnection, RekeyLimit, RevokedKeys, RDomain, SetEnv, StreamLocalBindMask, StreamLocalBindUnlink, TrustedUserCAKeys, UnusedConnectionTimeout, X11DisplayOffset, X11Forwarding, X11UseLocalhost}
 set match_keywords [lmap x [split $match_keywords {,}] {string trim $x}]
 
 ## keywords allowed multiple times by design
 set multi_keywords {AcceptEnv HostCertificate HostKey ListenAddress PermitListen PermitOpen Port Subsystem}
+
+## list of environment variables that are potentially dangerous
+set bad_env_vars {
+	"LD_PRELOAD" "LD_LIBRARY_PATH" "LD_AUDIT" "LD_DEBUG" "LD_DYNAMIC_WEAK" "LD_BIND_NOW" "LD_ORIGIN_PATH" "LD_RUN_PATH" "LD_ASSUME_KERNEL" "LD_DEBUG_OUTPUT" "LD_PROFILE" "LD_USE_LOAD_BIAS" "LD_TRACE_LOADED_OBJECTS" "LD_TRACE_PRELINKING" "LD_WARN" "LD_VERBOSE"
+	"DYLD_INSERT_LIBRARIES" "DYLD_LIBRARY_PATH" "DYLD_FRAMEWORK_PATH" "DYLD_FALLBACK_LIBRARY_PATH" "DYLD_FALLBACK_FRAMEWORK_PATH" "DYLD_ROOT_PATH" "DYLD_SHARED_CACHE_DIR" "DYLD_PRINT_LIBRARIES" "DYLD_PRINT_APIS" "DYLD_PRINT_ENV" "DYLD_PRINT_OPTS" "DYLD_FORCE_FLAT_NAMESPACE" "DYLD_NEW_LOCAL_SHARED_REGIONS" "DYLD_NO_FIX_PREBINDING" "DYLD_NO_PIE" "DYLD_NO_REBASE" "DYLD_NO_BIND" "DYLD_NO_INTERPOSE" "DYLD_DISABLE_DOFS" "DYLD_IMAGE_SUFFIX" "DYLD_VERSIONED_LIBRARY_PATH" "DYLD_VERSIONED_FRAMEWORK_PATH"
+	"PATH" "SHELL" "TERM"
+	"IFS" "CDPATH" "ENV" "BASH_ENV" "PS1" "PS2" "PS3" "PS4"
+	"MAIL" "MAILPATH" "USER" "USERNAME" "HOME" "LOGNAME"
+	"HOSTNAME" "HOST" "DISPLAY" "XAUTHORITY"
+	"SSH_AUTH_SOCK" "SSH_AGENT_PID" "SSH_CLIENT" "SSH_CONNECTION"
+	"SSH_TTY" "TMPDIR" "TMP" "TEMP"
+	"PYTHONPATH" "PERL5LIB" "PERLLIB" "RUBYLIB" "NODE_PATH"
+	"GEM_PATH" "GEM_HOME" "GEM_ROOT"
+	"EDITOR" "VISUAL" "PAGER"
+}
 
 ## global default values to be loaded by -d or -dc cli options
 set defaults {}
@@ -14,12 +29,16 @@ set defaults {}
 ##
 
 ## read file and parse config
-proc load_config {fn} {
-	return [parse_config [read_file $fn] $fn]
+## if raw_data is provided, it is used instead of reading the file
+proc load_config {fn {raw_data ""}} {
+	if {$raw_data eq ""} {
+		set raw_data [read_file $fn]
+	}
+	return [scan_config $raw_data $fn]
 }
 
 ## parse config from data and return a list of dicts for each relevant line
-proc parse_config {data {cfgfn ""}} {
+proc scan_config {data {cfgfn ""}} {
 	set result {}
 	set lines [split $data "\n"]
 	set lineno 0
@@ -37,7 +56,13 @@ proc parse_config {data {cfgfn ""}} {
 			continue
 		}
 
-		if {!$::params(ni) && [string equal -nocase $key "Include"]} {
+		set value [string trim $value]
+
+		if {[string equal -nocase $key "Include"]} {
+			if {$::params(ni)} {
+				addresult warning "Include directive found, but Include processing disabled via '-ni' switch." {Include files may exist and may contain more directives. Please check manually.}
+				continue
+			}
 			foreach globpattern [::textutil::splitx $value] {
 				foreach inc_fn [lsort [glob -type f -- $globpattern]] {
 					lappend result {*}[load_config $inc_fn]
@@ -66,9 +91,10 @@ proc map_aliases {cfgdata} {
 		set key [dict get $entry key]
 		switch -nocase -- $key {
 			authorizedkeysfile2 { set key "AuthorizedKeysFile" }
-			hostdsakey { set key "HostKeyFile" }
+			hostdsakey { set key "HostKey" }
 			dsaauthentication { set key "PubkeyAuthentication" }
-			skeyauthentication { set key "ChallengeResponseAuthentication" }
+			skeyauthentication { set key "KbdInteractiveAuthentication" }
+			ChallengeResponseAuthentication { set key "KbdInteractiveAuthentication" }
 			keepalive { set key "TCPKeepAlive" }
 			verifyreversemapping -
 			reversemappingcheck { set key "UseDNS" }
@@ -79,13 +105,18 @@ proc map_aliases {cfgdata} {
 	return $result
 }
 
+proc is_yes {value} {
+	set value [string tolower $value]
+	return [expr {$value eq "yes" || $value eq "true"}]
+}
+
 ## perform security check on file
-proc check_file {fn} {
+proc check_file {fn {raw_data ""}} {
 	set result {}
 	set ::check_errors 0
 	set section "global"
 
-	set cfgdata [load_config $fn]
+	set cfgdata [load_config $fn $raw_data]
 	set cfgdata [map_aliases $cfgdata]
 
 	## merge with defaults
@@ -107,9 +138,8 @@ proc check_file {fn} {
 
 		switch -nocase -- $key {
 			AcceptEnv {
-				set bad_vars {"LD_LIBRARY_PATH" "DYLD_LIBRARY_PATH" "PATH"}
 				foreach env_pattern [wsplit $value] {
-					if {[in_list $bad_vars $env_pattern -glob]} {
+					if {[in_list $::bad_env_vars $env_pattern -glob]} {
 						addresult critical "dangerous environment variable accepted by pattern: $env_pattern" {From the manual: "Be warned that some environment variables could be used to bypass restricted user environments. For this reason, care should be taken in the use of this directive."}
 					} else {
 						addresult notice "extra environment variable accepted by pattern: $env_pattern" {The default is not to accept any environment variables. Please make sure, that this variable pattern is actually required.}
@@ -156,20 +186,20 @@ proc check_file {fn} {
 
 			AuthorizedKeysCommand -
 			AuthorizedPrincipalsCommand {
-				if {$value ne "" && $value ne "none"} {
+				if {$value ne "" && [string tolower $value] ne "none"} {
 					addresult info "$key is set to $value" {FYI.}
-				}
-				if {$value ne "" && $value ne "none" && !$::params(ns)} {
-					if {![file exists $value]} {
-						addresult notice "$key does not exist" {This will never work.}
-					} elseif {![file executable $value]} {
-						addresult notice "$key is not executable" {This will never work.}
-					} else {
-						if {[file_mode $value] & 0o022} {
-							addresult warning "$key is writable by group or others" {Please change file permissions immediately.}
-						}
-						if {[check_parent_dir_mode $value 0o022]} {
-							addresult warning "parent directory is writable by group or others" {Please change file permissions if necessary.}
+					if {!$::params(ns)} {
+						if {![file exists $value]} {
+							addresult notice "$key does not exist" {This will never work.}
+						} elseif {![file executable $value]} {
+							addresult notice "$key is not executable" {This will never work.}
+						} else {
+							if {[file_mode $value] & 0o022} {
+								addresult warning "$key is writable by group or others" {Please change file permissions immediately.}
+							}
+							if {[check_parent_dir_mode $value 0o022]} {
+								addresult warning "parent directory is writable by group or others" {Please change file permissions if necessary.}
+							}
 						}
 					}
 				}
@@ -177,12 +207,13 @@ proc check_file {fn} {
 
 			AuthorizedKeysCommandUser -
 			AuthorizedPrincipalsCommandUser {
-				if {$value eq "root"} {
+				if {[string tolower $value] eq "root"} {
 					addresult warning "authorized keys command user is root" {Executing this command as root is most likely not necessary. Please change this user to an unpriviliged user account dedicated to the authorized keys command.}
 				}
 			}
 
-			CheckMail {
+			CheckMail -
+			UsePrivilegeSeparation {
 				addresult critical "old SSH version" "$key has been deprecated for a very long time. Please upgrade your SSH installation."
 			}
 
@@ -194,22 +225,22 @@ proc check_file {fn} {
 			}
 
 			DebianBanner {
-				if {$value eq "yes"} {
+				if {[is_yes $value]} {
 					addresult notice "information disclosure / extra version" {With the principle of least privilege in mind, it is a good idea to divulge as little information as possible. Please set this to 'no'.}
 				}
 			}
 
 			GatewayPorts {
-				if {$value eq "yes"} {
+				if {[is_yes $value]} {
 					addresult notice "$key is set to $value" {This is usually a bad idea, unless you know what you are doing. Please consider setting this option at least to 'clientspecified' or better yet to 'no'.}
-				} elseif {$value eq "clientspecified"} {
+				} elseif {[string tolower $value] eq "clientspecified"} {
 					addresult info "$key is net to $value" {Be aware that remote hosts may connect to local ports via port forwarding.}
 				}
 			}
 
 			GSSAPICleanupCredentials -
 			KerberosTicketCleanup {
-				if {$value eq "no"} {
+				if {![is_yes $value]} {
 					addresult notice "credentials are stored past logout" {Unless there is a specific reason for retaining these credentials, please turn this setting to 'yes'.}
 				}
 			}
@@ -235,13 +266,13 @@ proc check_file {fn} {
 			}
 
 			HostbasedAuthentication {
-				if {$value eq "yes"} {
+				if {[is_yes $value]} {
 					addresult info "host based authentication is enabled" {This authentication method should only be used in trusted environments with similar access levels, e.g. a university ZIP pool or hosts of a cluster computing group.}
 				}
 			}
 
 			HostbasedUsesNameFromPacketOnly {
-				if {$value eq "yes"} {
+				if {[is_yes $value]} {
 					addresult notice "host based hostname spoofing may be possible" {This option should only be set if IP to name resolution is not possible for some reason.}
 				}
 			}
@@ -270,6 +301,10 @@ proc check_file {fn} {
 				}
 			}
 
+			LogVerbose {
+				addresult info "LogVerbose is set" {This indicates a debugging environment. Log messages may contain sensitive information.}
+			}
+
 			MACs {
 				if {$lineno == 0} {
 					addresult info "using default list of MAC algorithms" {This is most likely ok. Check out 'ssh -Q mac' for a list of available algorithms to choose from.}
@@ -293,25 +328,37 @@ proc check_file {fn} {
 			}
 
 			PasswordAuthentication {
-				if {$value eq "yes"} {
+				if {[is_yes $value]} {
 					addresult notice "login via password is allowed" {Public key based authentication methods are considered much more secure. Unless your configuration contains some kind of one-time-password, e.g. via PAM, this setting should be changed to 'no'.}
 				}
 			}
 
 			PermitEmptyPasswords {
-				if {$section eq "global" && $value eq "yes"} {
+				if {$section eq "global" && [is_yes $value]} {
 					addresult warning "empty passwords are allowed globally" {Please use Match blocks to allow password-less logins for specific accounts only rather than globally.}
 				}
 			}
 
 			PermitRootLogin {
-				if {$value eq "yes"} {
+				if {[is_yes $value]} {
 					addresult warning "root login with password is enabled" {Why?}
 				}
 			}
 
+			PermitUserEnvironment {
+				if {[string tolower $value] ne "no"} {
+					addresult notice "user environment is set" {This may be a security risk in a restricted environment, e.g. without user shell access.}
+				}
+			}
+
+			PermitUserRC {
+				if {[is_yes $value]} {
+					addresult info "user rc is enabled" {This is the default, but it may be a security risk in a restricted environment, e.g. without user shell access.}
+				}
+			}
+
 			PubkeyAuthentication {
-				if {$section eq "global" && $value eq "no"} {
+				if {$section eq "global" && ![is_yes $value]} {
 					addresult notice "public key authentication is disabled globally" {Why?}
 				}
 			}
@@ -323,46 +370,87 @@ proc check_file {fn} {
 				}
 			}
 
+			RequiredRSASize {
+				if {[string is integer $value] && $value < 3072} {
+					addresult warning "Required RSA key size is rather weak" {While 1024 may be the default, enforcing at least 3072 bits for RSA keys is highly recommended.}
+				}
+			}
+
+			SecurityKeyProvider {
+				if {[string tolower $value] ne "internal" && !$::params(ns) && ([file_mode $value] & 0o022 || [check_parent_dir_mode $value 0o022])} {
+					addresult critical "security key provider is writable" {The SecurityKeyProvider or its parent directory is writable by group or others. Please change file permissions immediately.}
+				}
+			}
+
 			ServerKeyBits {
 				if {[string is integer $value] && $value < 2048} {
-					addresult warning "protocol 1 server key is rather weak" {Anything below 2048 bits is considered weak. Please don't use protocol 1 anymore, but if you absolutely have to, then set this value to at least 2048, please.}
+					addresult warning "protocol 1 server key is rather weak" {SSH protocol 1 is deprecated. In addition, a value below 2048 bits is considered weak.}
+				}
+			}
+
+			SshdSessionPath -
+			SshdAuthPath {
+				if {$lineno != 0} {
+					addresult info "$key is set" "This configuration is using a custom $key."
+					if {!$::params(ns) && ([file_mode $value] & 0o022 || [check_parent_dir_mode $value 0o022])} {
+						addresult critical "$key is writable" "The $key or its parent directory is writable by group or others. Please change file permissions immediately."
+					}
 				}
 			}
 
 			StrictModes {
-				if {$value eq "no"} {
+				if {![is_yes $value]} {
 					addresult warning "ssh does not check file modes" {The manual states: "This is normally desirable because novices sometimes accidentally leave their directory or files world-writable."}
 				}
 			}
 
 			UsePrivilegeSeparation {
-				if {$value eq "no"} {
+				if {![is_yes $value]} {
 					addresult critical "sandboxing and privilege separation disabled" {Privilege separation and sandboxing has been the default for years. This protection must remain enabled!}
-				} elseif {$value ne "sandbox"} {
+				} elseif {[string tolower $value] ne "sandbox"} {
 					addresult warning "sandboxing disabled" {Sandboxing has been the default for years. This options should be set to 'sandbox'.}
 				}
 			}
 
 			VersionAddendum {
-				if {$value ne "none"} {
+				if {[string tolower $value] ne "none"} {
 					addresult notice "You have a version addendum: $value" {Nice.}
 				}
 			}
 
 			X11UseLocalhost {
-				if {$value eq "no"} {
+				if {![is_yes $value]} {
 					addresult notice "X11 is bound to the wildcard address" {This is usually not desired without additional access restrictions.}
 				}
 			}
 
+			HostKey {
+				if {!$::params(ns)} {
+					if {![file exists $value]} {
+						addresult warning "$value does not exist" {File missing?}
+					} else {
+						if {[file_mode $value] & 0o022} {
+							addresult warning "$value is writable by group or others" {Please change file permissions immediately.}
+						}
+						if {[check_parent_dir_mode $value 0o022]} {
+							addresult warning "$value: parent directory is writable by group or others" {Please change file permissions.}
+						}
+					}
+				}
+			}
+
 			AddressFamily -
+			AFSTokenPassing -
 			AllowAgentForwarding -
 			AllowStreamLocalForwarding -
 			AllowTcpForwarding -
 			AuthorizedKeysFile -
 			AuthorizedPrincipalsFile -
 			Banner -
-			ChallengeResponseAuthentication -
+			KbdInteractiveAuthentication -
+			CASignatureAlgorithms -
+			ChannelTimeout -
+			UnusedConnectionTimeout -
 			ChrootDirectory -
 			ClientAliveCountMax -
 			ClientAliveInterval -
@@ -375,28 +463,34 @@ proc check_file {fn} {
 			GSSAPIKeyExchange -
 			GSSAPIStrictAcceptorCheck -
 			GSSAPIStoreCredentialsOnRekey -
+			HostbasedAcceptedAlgorithms -
+			PubkeyAcceptedAlgorithms -
 			HostCertificate -
-			HostKey -
 			HostKeyAgent -
 			IgnoreRhosts -
 			IgnoreUserKnownHosts -
 			IPQoS -
-			KbdInteractiveAuthentication -
 			KerberosAuthentication -
 			KerberosGetAFSToken -
 			KerberosOrLocalPasswd -
+			KerberosTgtPassing -
 			ListenAddress -
 			MaxStartups -
+			ModuliFile -
 			PermitListen -
 			PermitOpen -
 			PermitTTY -
 			PermitTunnel -
-			PermitUserEnvironment -
-			PermitUserRC -
+			PerSourceMaxStartups -
+			PerSourceNetBlockSize -
+			PerSourcePenalties -
+			PerSourcePenaltyExemptList -
 			PidFile -
 			Port -
 			PrintLastLog -
 			PrintMotd -
+			PubkeyAuthOptions -
+			RefuseConnection -
 			RekeyLimit -
 			RevokedKeys -
 			RDomain -
@@ -412,6 +506,7 @@ proc check_file {fn} {
 			UseDNS -
 			UseLogin -
 			UsePAM -
+			PAMServiceName -
 			X11DisplayOffset -
 			X11Forwarding -
 			XAuthLocation {
@@ -495,7 +590,7 @@ proc check_file {fn} {
 					## assume the insecure value
 					set secvalue yes
 				}
-				if {$secvalue eq "yes"} {
+				if {[is_yes $secvalue]} {
 					lappend restrictcheck_results $seckey
 				}
 			}
@@ -507,7 +602,7 @@ proc check_file {fn} {
 
 	if {!$::params(ns)} {
 		## check /etc/ssh/sshd_config owner/permissions
-		if {[file_mode $::params(f)] & 0022} {
+		if {[file_mode $::params(f)] & 0o022} {
 			addresult warning "$::params(f) is writable by group or others" {Please change file permissions immediately.}
 		}
 	}
@@ -517,16 +612,14 @@ proc check_file {fn} {
 }
 
 
+if {[info script] ne "" && [info exists ::source_only] && $::source_only} {
+	## stop here if source_only is set, e.g. for unit tests
+	return
+}
+
 ## CLI
 
 print_banner
-# puts "------------------------------------------------------------------------------"
-# puts "This is the OpenSSHd Security Config Checker v$sshdcc_version"
-# puts "  (c) 2018-2023 SektionEins GmbH / Ben Fuhrmannek - https://sektioneins.de/"
-# puts "  https://github.com/sektioneins/sshdcc"
-# puts "running on $tcl_platform(os) $tcl_platform(osVersion) $tcl_platform(machine) with Tcl $tcl_version [expr {$isatty ? "with" : "without"}] TTY"
-# puts "started at [timestamp]"
-# puts "------------------------------------------------------------------------------"
 
 set options {
 	{f.arg "/etc/ssh/sshd_config" "scan file"}
@@ -547,11 +640,11 @@ try {
 	puts $result
 	puts "## EXAMPLES"
 	puts "\nCheck current system:"
-	puts "  HERE->$ $argv0 -dc 'sudo sshd -f /dev/null -T'"
+	puts "  \$ $argv0 -dc 'sudo sshd -f /dev/null -T'"
 	puts "\nCheck configuration copied from other system:"
-	puts "  REMOTE$ sudo sshd -f /dev/null -T >defaults.conf"
-	puts "  ... now copy sshd_config and defaults.conf to some other machine ..."
-	puts "  OTHER-$ $argv0 -f sshd_config -d defaults.conf -ns"
+	puts "  \$ ssh root@remote \"sshd -f /dev/null -T\" >defaults.conf"
+	puts "  \$ scp root@remote:/etc/ssh/sshd_config ."
+	puts "  \$ $argv0 -f sshd_config -d defaults.conf -ns"
 	exit 1
 }
 
@@ -564,6 +657,9 @@ puts "additional live system checks are [expr {$params(ns) ? {disabled} : {enabl
 ## defaults
 
 if {$params(dc0)} {
+	if {$params(dc) ne ""} {
+		putx "WARNING: Both -dc0 and -dc are given. Ignoring -dc."
+	}
 	set params(dc) {sudo sshd -f /dev/null -T}
 }
 if {$params(d) ne ""} {
@@ -571,7 +667,7 @@ if {$params(d) ne ""} {
 	set defaults [load_config $params(d)]
 } elseif {$params(dc) ne ""} {
 	puts "loading defaults from command '$params(dc)'"
-	set defaults [parse_config [read_cmd $params(dc)]]
+	set defaults [scan_config [read_cmd $params(dc)]]
 } else {
 	putx "NOTE: No defaults were loaded. For better results, please specify either -d or -dc. See -h for more help."
 }
